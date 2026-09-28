@@ -1,1 +1,107 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>PuffPay</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<style>
+:root{--bg:#f6f0ff;--ink:#241a3a;--pri:#7a4dff;--dim:#6f6688;--card:#fff;--bad:#c62828;--ok:#1b7a43}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:44px;line-height:1.05;margin:28px 0 8px;letter-spacing:-1.5px}
+.lead{color:var(--dim);font-size:18px;margin:0 0 24px}
+.card{background:var(--card);border-radius:28px;padding:20px;box-shadow:0 10px 0 #e3d8ff;margin-bottom:22px}
+textarea,input{width:100%;font:inherit;border:2px solid #e3d8ff;border-radius:16px;padding:12px;color:var(--ink);background:#fff}
+textarea{height:110px;resize:vertical}
+button{font:inherit;font-weight:700;background:var(--pri);color:#fff;border:0;border-radius:999px;padding:13px 22px;cursor:pointer;width:100%;margin-top:12px}
+button:disabled{opacity:.5}
+table{width:100%;border-collapse:collapse;margin:10px 0}td{padding:6px 4px;vertical-align:top}
+td input{padding:8px 10px;font-size:13px;border-radius:12px}.amt{white-space:nowrap;font-weight:700}
+.warn{background:#fff4d6;border-radius:14px;padding:10px 14px;margin:8px 0;font-size:14px}
+.err{color:var(--bad);font-weight:600}.ok{color:var(--ok);font-weight:700}
+.pill{display:inline-block;border-radius:999px;padding:3px 12px;font-weight:700;font-size:14px;background:#efe8ff}
+a{color:var(--pri);word-break:break-all}.hint{color:var(--dim);font-size:14px}
+</style></head><body><main>
+<h1>Say who gets paid.<br>PuffPay does the rest.</h1>
+<p class="lead">Type the split in plain English. SERV Reasoning turns it into a checked table. One signature pays everyone on Robinhood Chain.</p>
+<div class="card">
+ <textarea id="t" placeholder="Pay Ada, Tobi and Kemi from 0.003 ETH. Ada gets double."></textarea>
+ <p class="hint">Include each person's 0x address, or fill them in below.</p>
+ <button id="parse">Build the split</button>
+</div>
+<div id="review"></div>
+<div id="status"></div>
+<script>
+const CONTRACT = "0xaEB42103Bfb988a1B92E1C3ECA8277594D9bDA9f";
+const CHAIN = { chainId: "0xB626", chainName: "Robinhood Chain Testnet",
+  nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18},
+  rpcUrls:["https://rpc.testnet.chain.robinhood.com"], blockExplorerUrls:["https://explorer.testnet.chain.robinhood.com"] };
+const EXPLORER = "https://explorer.testnet.chain.robinhood.com/tx/";
+const ABI = ["function split(address[] to,uint256[] amt,string memo) payable"];
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let plan = null;
 
+function compute(p) {
+  const total = ethers.parseEther(String(p.total_eth));
+  const rec = p.recipients.map(r => ({ ...r }));
+  let fixed = 0n; rec.forEach(r => { if (r.fixed_eth != null) { r.wei = ethers.parseEther(String(r.fixed_eth)); fixed += r.wei; } });
+  const rest = total - fixed, open = rec.filter(r => r.fixed_eth == null);
+  const w = open.reduce((a, r) => a + Math.round(r.weight * 1000), 0);
+  let given = 0n;
+  open.forEach((r, i) => { r.wei = i === open.length - 1 ? rest - given : rest * BigInt(Math.round(r.weight * 1000)) / BigInt(w); given += r.wei; });
+  return { total, rec, bad: rest < 0n };
+}
+
+$("parse").onclick = async () => {
+  $("parse").disabled = true; $("parse").textContent = "Reading..."; $("status").innerHTML = "";
+  try {
+    const r = await fetch("/api/parse", { method: "POST", body: JSON.stringify({ text: $("t").value }) });
+    const d = await r.json(); if (d.error) throw new Error(d.error);
+    if (!d.recipients?.length || !(d.total_eth > 0)) throw new Error("Couldn't find recipients and a total. Try: 'Pay Ada and Tobi from 0.002 ETH'.");
+    plan = d; render();
+  } catch (e) { $("review").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
+  $("parse").disabled = false; $("parse").textContent = "Build the split";
+};
+
+function render() {
+  const c = compute(plan);
+  $("review").innerHTML = `<div class="card"><b>${esc(plan.memo || "Split")}</b>
+   ${(plan.warnings || []).map(w => `<div class="warn">${esc(w)}</div>`).join("")}
+   ${c.bad ? `<div class="warn err">Fixed amounts are more than the total.</div>` : ""}
+   <table>${c.rec.map((r, i) => `<tr><td>${esc(r.name)}</td>
+     <td><input data-i="${i}" value="${esc(r.address)}" placeholder="0x address"></td>
+     <td class="amt">${ethers.formatEther(r.wei)}</td></tr>`).join("")}</table>
+   <div>Total <b>${ethers.formatEther(c.total)} ETH</b></div>
+   <button id="pay">Connect and pay everyone</button></div>`;
+  document.querySelectorAll("td input").forEach(el => el.oninput = () => plan.recipients[el.dataset.i].address = el.value.trim());
+  $("pay").onclick = pay;
+}
+
+function step(html) { $("status").innerHTML = `<div class="card">${html}</div>`; }
+
+async function pay() {
+  try {
+    const c = compute(plan);
+    if (c.bad) throw new Error("Fix the amounts first.");
+    const addrs = c.rec.map(r => r.address);
+    const badIdx = addrs.findIndex(a => !a || !ethers.isAddress(a));
+    if (badIdx >= 0) throw new Error(`${c.rec[badIdx].name}: needs a valid 0x address.`);
+    if (new Set(addrs.map(a => a.toLowerCase())).size !== addrs.length) throw new Error("Two people have the same address.");
+    if (!window.ethereum) throw new Error("No wallet found. Install MetaMask.");
+    if (!ethers.isAddress(CONTRACT)) throw new Error("Contract address not set in index.html.");
+    step(`<span class="pill">1/3</span> Connecting wallet...`);
+    try { await ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN.chainId }] }); }
+    catch (e) { if (e.code === 4902 || e.code === -32603) await ethereum.request({ method: "wallet_addEthereumChain", params: [CHAIN] }); else throw e; }
+    const signer = await new ethers.BrowserProvider(ethereum).getSigner();
+    const bal = await signer.provider.getBalance(signer.address);
+    if (bal < c.total) throw new Error("Not enough test ETH. Use faucet.testnet.chain.robinhood.com.");
+    step(`<span class="pill">2/3</span> Confirm in your wallet...`);
+    const tx = await new ethers.Contract(CONTRACT, ABI, signer).split(addrs, c.rec.map(r => r.wei), plan.memo || "PuffPay", { value: c.total });
+    step(`<span class="pill">3/3 Pending</span><p>Sent. Waiting for confirmation.</p><a href="${EXPLORER + tx.hash}" target="_blank">${tx.hash}</a>`);
+    const rc = await tx.wait();
+    step(rc.status === 1
+      ? `<span class="ok">Paid. ${c.rec.length} people, one transaction.</span><p><a href="${EXPLORER + tx.hash}" target="_blank">View on explorer</a></p><p class="hint">${tx.hash}</p>`
+      : `<span class="err">Transaction failed on-chain.</span><p><a href="${EXPLORER + tx.hash}" target="_blank">${tx.hash}</a></p>`);
+  } catch (e) {
+    step(`<span class="err">${esc(e.code === "ACTION_REJECTED" ? "You rejected the transaction." : (e.shortMessage || e.message))}</span>`);
+  }
+}
+</script></main></body></html>
