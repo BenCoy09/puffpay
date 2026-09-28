@@ -90,7 +90,8 @@ async function pay() {
     step(`<span class="pill">1/3</span> Connecting wallet...`);
     try { await ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN.chainId }] }); }
     catch (e) { if (e.code === 4902 || e.code === -32603) await ethereum.request({ method: "wallet_addEthereumChain", params: [CHAIN] }); else throw e; }
-    const signer = await new ethers.BrowserProvider(ethereum).getSigner();
+    await ethereum.request({ method: "eth_requestAccounts" });
+   const signer = await new ethers.BrowserProvider(ethereum).getSigner();
     const bal = await signer.provider.getBalance(signer.address);
     if (bal < c.total) throw new Error("Not enough test ETH. Use faucet.testnet.chain.robinhood.com.");
     step(`<span class="pill">2/3</span> Confirm in your wallet...`);
